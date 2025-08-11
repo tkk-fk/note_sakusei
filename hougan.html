@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<title>方眼ノート作成（自由ピッチ・可変点線・多枚数・リーダー線・α）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body{font-family:sans-serif;text-align:center;padding:20px}
+  fieldset{display:inline-block;text-align:left;margin:8px;padding:12px 14px;border-radius:10px;border:1px solid #ddd}
+  label,select,input,button{font-size:1.0em;margin:6px 6px 0 0}
+  canvas{border:1px solid #ccc;margin-top:16px;max-width:100%;height:auto}
+  .row{margin-top:6px}
+  small{color:#666}
+</style>
+</head>
+<body>
+<h1>方眼ノート作成（自由ピッチ & 可変点線）</h1>
+
+<fieldset>
+  <legend>用紙と余白</legend>
+  <label>用紙：</label>
+  <select id="paper">
+    <option value="A3">A3（297×420）</option>
+    <option value="B4">B4（257×364）</option>
+    <option value="A4">A4（210×297）</option>
+    <option value="B5" selected>B5（182×257）</option>
+    <option value="CUSTOM">カスタム</option>
+  </select>
+  <span id="customPaperArea" style="display:none">
+    W(mm)<input type="number" id="paperW" value="182" min="50" step="0.1" style="width:90px">
+    H(mm)<input type="number" id="paperH" value="257" min="50" step="0.1" style="width:90px">
+  </span>
+  <br>
+  上<input type="number" id="mTop" value="20" step="0.5" style="width:80px">mm
+  左<input type="number" id="mLeft" value="15" step="0.5" style="width:80px">mm
+  右<input type="number" id="mRight" value="15" step="0.5" style="width:80px">mm
+  下<input type="number" id="mBottom" value="15" step="0.5" style="width:80px">mm
+</fieldset>
+
+<fieldset>
+  <legend>グリッド設定</legend>
+  ピッチ（mm）<input id="pitch" type="number" value="5" min="0.5" step="0.1" style="width:90px">
+  太線：<input type="number" id="majorEvery" value="2" min="0" step="1" style="width:90px"> マスごと
+  <small>（0=なし／1=毎マス／2=10mm相当…）</small>
+  <br>
+  線色：
+  <select id="gridColor">
+    <option value="#000000">黒</option>
+    <option value="#0072B2">青（色覚配慮）</option>
+    <option value="#009E73">緑（色覚配慮）</option>
+    <option value="#E69F00">オレンジ（色覚配慮）</option>
+    <option value="#F0E442">黄（色覚配慮・濃いめ）</option>
+  </select>
+  濃さ(α) <input id="alpha" type="number" value="1.0" min="0.2" max="1.0" step="0.05" style="width:90px">
+  <br>
+  <label><input type="checkbox" id="halfDotted" checked> 点線（ハーフピッチ）を入れる</label>
+  点線 長さ(mm)<input id="dashLen" type="number" value="1.0" min="0.2" max="5" step="0.1" style="width:80px">
+  間隔(mm)<input id="gapLen" type="number" value="1.6" min="0.2" max="5" step="0.1" style="width:80px">
+  <br>
+  <label><input type="checkbox" id="leftRed" checked> 左端の赤リーダー線</label>
+  <label><input type="checkbox" id="rightRed"> 右端の赤リーダー線</label>
+</fieldset>
+
+<fieldset>
+  <legend>ヘッダー＆ページ</legend>
+  テキスト <input id="nameText" type="text" value="＿＿＿年＿＿＿組＿＿番　名前＿＿＿＿＿＿＿＿＿＿" style="width:420px">
+  文字サイズ（mm）<input id="nameSize" type="number" value="4" step="0.5" style="width:90px">
+  作成枚数 <input id="numPages" type="number" value="1" min="1" max="200" step="1" style="width:90px"> 枚
+  <label><input type="checkbox" id="pageNumbers" checked> ページ番号を入れる</label>
+</fieldset>
+
+<div class="row">
+  <button id="previewBtn">プレビュー</button>
+  <button id="pdfBtn">PDFとして保存</button>
+</div>
+
+<canvas id="canvas" width="910" height="1285" aria-label="preview"></canvas>
+<div class="row"><small id="info"></small></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+  const PAPER_SIZES = { A3:{w:297,h:420}, B4:{w:257,h:364}, A4:{w:210,h:297}, B5:{w:182,h:257} };
+  const scale = 5; // 1mm = 5px（プレビュー）
+  const RED = {r:213,g:94,b:0}; // #D55E00（色覚配慮寄りの赤）
+
+  function getPaperWH(){
+    const p = document.getElementById('paper').value;
+    if(p==='CUSTOM'){
+      return { w: parseFloat(document.getElementById('paperW').value), h: parseFloat(document.getElementById('paperH').value) };
+    }
+    return PAPER_SIZES[p];
+  }
+
+  function computeLayout(){
+    const {w:PW,h:PH} = getPaperWH();
+    const mTop = parseFloat(document.getElementById('mTop').value);
+    const mLeft = parseFloat(document.getElementById('mLeft').value);
+    const mRight = parseFloat(document.getElementById('mRight').value);
+    const mBottom = parseFloat(document.getElementById('mBottom').value);
+    const step = Math.max(0.1, parseFloat(document.getElementById('pitch').value));
+
+    const innerW = Math.max(0, PW - mLeft - mRight);
+    const innerH = Math.max(0, PH - mTop - mBottom);
+
+    const cols = Math.floor(innerW / step);
+    const rows = Math.floor(innerH / step);
+
+    const gridW = cols * step;
+    const gridH = rows * step;
+    const GX = mLeft + (innerW - gridW)/2;
+    const GY = mTop + (innerH - gridH)/2;
+
+    return {PW,PH,mTop,mLeft,mRight,mBottom,step,innerW,innerH,cols,rows,gridW,gridH,GX,GY};
+  }
+
+  function drawPreview(){
+    const baseColorHex = document.getElementById('gridColor').value;
+    const alpha = clamp(parseFloat(document.getElementById('alpha').value), 0.2, 1.0);
+    const gridRGB = lightenWithWhite(hexToRgb(baseColorHex), alpha); // αで薄め
+    const majorEvery = Math.max(0, parseInt(document.getElementById('majorEvery').value || '0',10));
+    const nameText = document.getElementById('nameText').value;
+    const nameSize = parseFloat(document.getElementById('nameSize').value);
+    const halfDotted = document.getElementById('halfDotted').checked;
+    const dashLen = Math.max(0.2, parseFloat(document.getElementById('dashLen').value) || 1.0);
+    const gapLen  = Math.max(0.2, parseFloat(document.getElementById('gapLen').value)  || 1.6);
+    const leftRed = document.getElementById('leftRed').checked;
+    const rightRed = document.getElementById('rightRed').checked;
+    const numPages = Math.max(1, parseInt(document.getElementById('numPages').value || '1',10));
+    const showPN = document.getElementById('pageNumbers').checked;
+
+    const L = computeLayout();
+    const {PW,PH,mTop,mLeft,mRight,mBottom,step,cols,rows,gridW,gridH,GX,GY} = L;
+
+    // Canvas準備
+    const canvas = document.getElementById('canvas');
+    canvas.width  = Math.max(200, PW*scale);
+    canvas.height = Math.max(200, PH*scale);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.scale(scale, scale); // mm座標系
+
+    // ヘッダー（プレビューは通常描画。色は元色のまま）
+    ctx.fillStyle = rgbToCss(hexToRgb(baseColorHex));
+    ctx.font = `${nameSize}mm sans-serif`;
+    ctx.fillText(nameText, mLeft, mTop - Math.max(2, 0.6*nameSize));
+
+    // 下地：1マスごと 実線（薄め色）
+    ctx.strokeStyle = rgbToCss(gridRGB);
+    ctx.lineWidth = 0.12;
+    ctx.setLineDash([]);
+    for(let c=0;c<=cols;c++){
+      const x = GX + c*step;
+      ctx.beginPath(); ctx.moveTo(x,GY); ctx.lineTo(x, GY+gridH); ctx.stroke();
+    }
+    for(let r=0;r<=rows;r++){
+      const y = GY + r*step;
+      ctx.beginPath(); ctx.moveTo(GX,y); ctx.lineTo(GX+gridW, y); ctx.stroke();
+    }
+
+    // ハーフピッチ点線（薄め色）
+    if(halfDotted){
+      ctx.setLineDash([dashLen, gapLen]);
+      ctx.lineWidth = 0.12;
+      for(let c=0;c<cols;c++){
+        const x = GX + c*step + step/2;
+        ctx.beginPath(); ctx.moveTo(x,GY); ctx.lineTo(x, GY+gridH); ctx.stroke();
+      }
+      for(let r=0;r<rows;r++){
+        const y = GY + r*step + step/2;
+        ctx.beginPath(); ctx.moveTo(GX,y); ctx.lineTo(GX+gridW, y); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
+    // 太線（Nマスごと／0はスキップ。太線も薄め色）
+    if(majorEvery>=1){
+      ctx.lineWidth = 0.28;
+      for(let c=0;c<=cols;c+=majorEvery){
+        const x = GX + c*step;
+        ctx.beginPath(); ctx.moveTo(x,GY); ctx.lineTo(x,GY+gridH); ctx.stroke();
+      }
+      for(let r=0;r<=rows;r+=majorEvery){
+        const y = GY + r*step;
+        ctx.beginPath(); ctx.moveTo(GX,y); ctx.lineTo(GX+gridW,y); ctx.stroke();
+      }
+    }
+
+    // 赤リーダー線（左／右）
+    if(leftRed){ drawRedLine(ctx, GX, GY, gridH); }
+    if(rightRed){ drawRedLine(ctx, GX+gridW, GY, gridH); }
+
+    // フッター（©）プレビュー
+    ctx.fillStyle = "#777";
+    ctx.font = "3mm sans-serif";
+    const footer = "©特別支援教材開発研究所";
+    const fw = ctx.measureText(footer).width;
+    const fx = PW - mRight - fw;
+    const fy = PH - 2;
+    ctx.fillText(footer, fx, fy);
+
+    // ページ番号（プレビューは 1 / N を下中央）
+    if(showPN){
+      ctx.font = "3mm sans-serif";
+      const pn = `1 / ${numPages}`;
+      const pnw = ctx.measureText(pn).width;
+      ctx.fillText(pn, (PW - pnw)/2, PH - 2);
+    }
+
+    document.getElementById('info').textContent =
+      `用紙 ${PW}×${PH}mm / 余白 上${mTop} 左${mLeft} 右${mRight} 下${mBottom}mm / 内側 ${(PW-mLeft-mRight).toFixed(1)}×${(PH-mTop-mBottom).toFixed(1)}mm
+       ピッチ ${step}mm → 列${cols}×行${rows} / グリッド実寸 ${gridW.toFixed(2)}×${gridH.toFixed(2)}mm / α=${alpha.toFixed(2)} / 点線 長さ${dashLen} 間隔${gapLen}`;
+  }
+
+  function savePDF(){
+    const { jsPDF } = window.jspdf;
+    const baseColorHex = document.getElementById('gridColor').value;
+    const alpha = clamp(parseFloat(document.getElementById('alpha').value), 0.2, 1.0);
+    const gridRGB = lightenWithWhite(hexToRgb(baseColorHex), alpha);
+    const majorEvery = Math.max(0, parseInt(document.getElementById('majorEvery').value || '0',10));
+    const nameText = document.getElementById('nameText').value;
+    const nameSize = parseFloat(document.getElementById('nameSize').value);
+    const halfDotted = document.getElementById('halfDotted').checked;
+    const dashLen = Math.max(0.2, parseFloat(document.getElementById('dashLen').value) || 1.0);
+    const gapLen  = Math.max(0.2, parseFloat(document.getElementById('gapLen').value)  || 1.6);
+    const leftRed = document.getElementById('leftRed').checked;
+    const rightRed = document.getElementById('rightRed').checked;
+    const numPages = Math.max(1, parseInt(document.getElementById('numPages').value || '1',10));
+    const showPN = document.getElementById('pageNumbers').checked;
+
+    const L = computeLayout();
+    const {PW,PH,mTop,mLeft,mRight,mBottom,step,cols,rows,gridW,gridH,GX,GY} = L;
+
+    const pdf = new jsPDF({ unit:'mm', format:[PW,PH], orientation:'portrait' });
+
+    for(let p=1;p<=numPages;p++){
+      if(p>1) pdf.addPage([PW,PH],'portrait');
+
+      // --- ヘッダー（日本語文字化け防止：画像） ---
+      const headerImg = renderHeaderToImage(nameText, nameSize, hexToRgb(baseColorHex), PW, PH, mLeft, mTop);
+      pdf.addImage(headerImg.dataURL, 'PNG', headerImg.x, headerImg.y, headerImg.w, headerImg.h);
+
+      // --- グリッド（薄め色でベクタ線） ---
+      pdf.setDrawColor(gridRGB.r, gridRGB.g, gridRGB.b);
+      pdf.setLineDash([],0);
+      pdf.setLineWidth(0.1);
+      // 1マスごと 実線
+      for(let c=0;c<=cols;c++){ const x=GX+c*step; pdf.line(x,GY,x,GY+gridH); }
+      for(let r=0;r<=rows;r++){ const y=GY+r*step; pdf.line(GX,y,GX+gridW,y); }
+
+      // ハーフピッチ点線
+      if(halfDotted){
+        pdf.setLineDash([dashLen, gapLen],0);
+        pdf.setLineWidth(0.1);
+        for(let c=0;c<cols;c++){ const x=GX+c*step+step/2; pdf.line(x,GY,x,GY+gridH); }
+        for(let r=0;r<rows;r++){ const y=GY+r*step+step/2; pdf.line(GX,y,GX+gridW,y); }
+        pdf.setLineDash([],0);
+      }
+
+      // 太線
+      if(majorEvery>=1){
+        pdf.setLineWidth(0.25);
+        for(let c=0;c<=cols;c+=majorEvery){ const x=GX+c*step; pdf.line(x,GY,x,GY+gridH); }
+        for(let r=0;r<=rows;r+=majorEvery){ const y=GY+r*step; pdf.line(GX,y,GX+gridW,y); }
+      }
+
+      // 赤リーダー線（左／右）
+      if(leftRed){ pdf.setDrawColor(RED.r,RED.g,RED.b); pdf.setLineWidth(0.5); pdf.line(GX,GY, GX, GY+gridH); }
+      if(rightRed){ pdf.setDrawColor(RED.r,RED.g,RED.b); pdf.setLineWidth(0.5); pdf.line(GX+gridW,GY, GX+gridW, GY+gridH); }
+      // grid色に戻す必要があればここで戻す: pdf.setDrawColor(gridRGB.r, gridRGB.g, gridRGB.b);
+
+      // --- フッター（©）日本語→画像で ---
+      const footerImg = renderFooterToImage("©特別支援教材開発研究所", 3, PW, PH, mRight);
+      pdf.addImage(footerImg.dataURL, 'PNG', footerImg.x, footerImg.y, footerImg.w, footerImg.h);
+
+      // --- ページ番号（半角のみなので文字化けしない。下中央） ---
+      if(showPN){
+        pdf.setFontSize(9);
+        pdf.setTextColor(120);
+        const text = `${p} / ${numPages}`;
+        // 中央配置
+        const x = PW/2;
+        const y = PH - 4;
+        pdf.text(text, x, y, {align:'center'});
+      }
+    }
+
+    pdf.save(`Grid_${cols}x${rows}_${step}mm_${numPages}p.pdf`);
+  }
+
+  // ======= 日本語テキストはCanvas→PNGで埋め込み =======
+  function renderHeaderToImage(text, sizeMM, rgb, PW, PH, mLeft, mTop){
+    const dpi = 600, mmToPx = mm => Math.round(mm*dpi/25.4);
+    const pad = 1.0; // mm
+    const fontSizePx = Math.round(sizeMM*dpi/25.4);
+    const wMM = PW - mLeft*2;
+    const hMM = sizeMM + pad*2;
+
+    const c = document.createElement('canvas');
+    c.width = mmToPx(wMM); c.height = mmToPx(hMM);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,c.width,c.height);
+    ctx.fillStyle = `rgb(${rgb.r},${rgb.g},${rgb.b})`;
+    ctx.font = `${fontSizePx}px sans-serif`;
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(text, mmToPx(pad), c.height - mmToPx(pad));
+
+    const xMM = mLeft;
+    const yMM = mTop - (hMM - sizeMM*0.4); // 少し上寄せ
+    return { dataURL: c.toDataURL('image/png'), x:xMM, y:yMM, w:wMM, h:hMM };
+  }
+
+  function renderFooterToImage(text, sizeMM, PW, PH, mRight){
+    const dpi = 600, mmToPx = mm => Math.round(mm*dpi/25.4);
+    const pad = 0.8; // mm
+    const fontSizePx = Math.round(sizeMM*dpi/25.4);
+    const wMM = 70; const hMM = sizeMM + pad*2;
+
+    const c = document.createElement('canvas');
+    c.width = mmToPx(wMM); c.height = mmToPx(hMM);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,c.width,c.height);
+    ctx.fillStyle = 'rgb(119,119,119)';
+    ctx.font = `${fontSizePx}px sans-serif`;
+    ctx.textBaseline = 'bottom';
+    const m = ctx.measureText(text);
+    const tx = Math.max(0, c.width - m.width - mmToPx(pad));
+    const ty = c.height - mmToPx(pad);
+    ctx.fillText(text, tx, ty);
+
+    const xMM = PW - mRight - wMM;  // 右余白の内側にそっと
+    const yMM = PH - hMM + 1;       // 下端から少し上
+    return { dataURL: c.toDataURL('image/png'), x:xMM, y:yMM, w:wMM, h:hMM };
+  }
+
+  // ======= ユーティリティ =======
+  function hexToRgb(hex){ const h=hex.replace('#',''); const n=parseInt(h,16); return {r:(n>>16)&255,g:(n>>8)&255,b:n&255}; }
+  function rgbToCss({r,g,b}){ return `rgb(${r},${g},${b})`; }
+  function lightenWithWhite(rgb, a){
+    // a=1 -> 原色 / a=0 -> 白
+    return {
+      r: Math.round(255 + (rgb.r - 255)*a),
+      g: Math.round(255 + (rgb.g - 255)*a),
+      b: Math.round(255 + (rgb.b - 255)*a)
+    };
+  }
+  function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+  function drawRedLine(ctx, x, y, h){
+    ctx.strokeStyle = rgbToCss(RED);
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x,y+h); ctx.stroke();
+  }
+
+  // UI
+  document.getElementById('paper').addEventListener('change', ()=>{
+    document.getElementById('customPaperArea').style.display = (document.getElementById('paper').value==='CUSTOM')?'inline-block':'none';
+  });
+  document.getElementById('previewBtn').addEventListener('click', drawPreview);
+  document.getElementById('pdfBtn').addEventListener('click', savePDF);
+
+  // 初期表示
+  drawPreview();
+</script>
+</body>
+</html>
